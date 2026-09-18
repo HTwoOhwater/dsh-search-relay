@@ -1,0 +1,40 @@
+# DSH 配置片段示例
+#
+# 把 web-search-deepseek 段合并进 ~/.dsh/settings.yaml（install.mjs 会自动追加）。
+# 完整文件里还有 llm-deepseek / agent-default-model 等段，这里只列搜索相关的。
+
+web-search-deepseek:
+  # 接口地址。插件会在后面自己拼 /messages，所以这里要写到 /v1 为止。
+  # 反例：写成 https://host:4000/v1/messages 会变成 .../v1/messages/messages → 404
+  baseURL: https://xplt.sdu.edu.cn:4000/v1
+
+  # 模型名，必须是中继团队白名单里的名字。
+  # 报错 "team not allowed to access model ... Tried to access X" 时，
+  # 报错信息里会列出可用模型，从这里挑一个填进来。
+  model: ByteDance-volcengine/DeepSeek-V4.1-Flash
+
+  # 以下都是可选项，留空即用默认值：
+
+  # 读取密钥用的环境变量名（默认 DEEPSEEK_API_KEY）。
+  # 密钥本身写在 ~/.dsh/.credentials.yaml，不写在这里。
+  # apiKeyEnv: DEEPSEEK_API_KEY
+
+  # Anthropic API 版本头（默认 2023-06-01）
+  # apiVersion: 2023-06-01
+
+  # 单次请求的最大输出 token（默认 4096）
+  # maxTokens: 4096
+
+  # 单次请求最多允许几次搜索，relay 模式下也限制最多抓取几个 query（默认 5）
+  # maxUses: 5
+
+# 密钥文件 ~/.dsh/.credentials.yaml 的格式（单独一个文件，别提交到 git）。
+# 注意必须是 version: 1 + refs: 的嵌套结构——DSH 的解析器对格式很严格，
+# 扁平的 `DEEPSEEK_API_KEY: sk-x` 会被拒绝，导致整个凭据文件加载失败：
+#
+#   version: 1
+#   refs:
+#     DEEPSEEK_API_KEY: sk-xxxxxxxxxxxxxxxx
+#
+# 用 `node install.mjs --api-key sk-xxx` 会自动按正确格式写入并校验。
+# 也可以用环境变量 DEEPSEEK_API_KEY 代替（要求 dsh web 进程能看到该变量）。
