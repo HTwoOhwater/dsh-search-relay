@@ -187,7 +187,9 @@ relay 路径**不做第二次模型调用**：省一次往返，也避免模型�
 
 ```
 dsh-search-relay/
-├── install.mjs                       一键安装/还原（Node，跨平台）
+├── install.mjs                       一键安装/还原补丁（Node，跨平台）
+├── upgrade.mjs                       升级 DSH 并在升级后自动重打补丁
+├── repair-session.mjs                抢救被空 callId 毒化的会话日志
 ├── config/settings.example.yaml      配置示例
 ├── docs/CHANGES.md                   改了什么、为什么、怎么验证的
 ├── NOTICE.md                         第三方代码与许可说明
@@ -200,6 +202,81 @@ dsh-search-relay/
         ├── patch-client.mjs          客户端「模型」字段补丁（幂等、锚点式）
         └── lib/client.js             打好的完整文件（仅 --overlay-client 兜底用）
 ```
+
+---
+
+## 附：已知上游 bug —— 会话被「空 callId」毒化
+
+**症状**：打开某个历史会话时弹出
+
+```
+历史加载失败：stored session "session-…" is corrupt:
+failed validation: Error: session event at seq NNNNN message must have tool source
+```
+
+**这不是本插件的问题，是上游 bug**，社区有数十条同类报告（
+[#3269](https://github.com/deepseek-ai/deepseek-harness/discussions/3269)、
+[#2169](https://github.com/deepseek-ai/deepseek-harness/discussions/2169)、
+[#1915](https://github.com/deepseek-ai/deepseek-harness/discussions/1915)、
+[#4385](https://github.com/deepseek-ai/deepseek-harness/discussions/4385)、
+[#4387](https://github.com/deepseek-ai/deepseek-harness/discussions/4387)、
+[#4611](https://github.com/deepseek-ai/deepseek-harness/discussions/4611) …）。
+
+**成因**：`llm-deepseek` 处理流式 tool_call 增量的守卫写成
+
+```js
+if (call.id !== void 0) block.callId = call.id;   // 空串 "" 也满足条件，会覆盖首帧的真 id
+```
+
+网关/中继在续帧里发**显式空串** `id: ""` 时会覆盖首帧捕获的真 id，于是 `tool/call`
+与 `tool/result` 都以 `callId: ""` 落盘。加载时的防损坏校验（有意设计，社区共识是
+**不该放宽**）要求 callId 非空 → 整个会话永久无法加载。
+
+**上游修复**：`0.1.5-rc.2` 起改成 `acceptIdentity(current, incoming)`（首个非空值优先）。
+`0.1.2-rc.1` 及更早版本仍受影响。
+
+**判断你的中继会不会触发**：用流式请求让模型调一次工具，看续帧里的 `tool_calls[].id`
+是**字段缺失**还是**空串**——缺失不会触发，空串必然触发。实测某些网关路由（LiteLLM 后面
+的非 GA 模型）会发空串。
+
+### 抢救已经坏掉的会话
+
+```bash
+node repair-session.mjs --scan                 # 体检所有会话，列出会被拒绝的
+node repair-session.mjs --scan --apply         # 备份并修复全部
+node repair-session.mjs <session.jsonl.zstd> --apply   # 修单个
+node repair-session.mjs --restore              # 还原最近一次备份
+```
+
+它为每个空 id 生成唯一占位 id，并**同步回填四处引用**（缺一处都会让 UI 配对错乱）：
+`tool-call-chunks` 的 `data.id`、`assistant/message` 里 tool-call 块的 `id`、
+`tool/call` 的 `data.callId`、`tool/result` 的 `source.callId` 与 `content[0].toolCallId`。
+
+物理格式上踩过的坑（脚本已处理）：会话日志是**拼接式 zstd 帧**容器，必须逐帧解码重压；
+**第一帧必须恰好是 header 一行**（压成单帧会让整个 DSH 启动失败）；帧要带 checksum；
+**校验通过才写盘**，写前自动备份。
+
+### 升级到修复版
+
+```bash
+# 先停掉 dsh web（Windows 上 npm 覆盖正在使用的文件可能失败）
+node upgrade.mjs --check          # 看看会做什么
+node upgrade.mjs                  # 升级 + 自动重打补丁 + 复验
+```
+
+`upgrade.mjs` 先备份被补丁的文件，再 `npm i -g @deepseek-ai/dsh@0.1.5-rc.2`，
+然后调用 `install.mjs` 重新打上搜索 relay 补丁与客户端「模型」字段补丁。
+
+> 搜索插件在 `0.1.2-rc.1` 与 `0.1.5-rc.2` 之间**字节完全相同**（SHA256 一致），
+> 所以 relay 补丁可以直接沿用，无需移植。
+
+**升级后旧会话会被自动迁移**：日志格式从 v0 升到 v3，写成新的 `session.v3.jsonl.zstd`，
+**原 v0 文件保留**。注意一个上游未修的后续问题（
+[#6686](https://github.com/deepseek-ai/deepseek-harness/discussions/6686)）：迁移后若某些事件
+缺 `data.message`，三个官方投影会无保护读取而抛
+`failed to project session … reading 'content'`。可以提前离线预检：扫描 v0 日志里
+是否存在「类型暗示有 message 体但 `data.message` 缺失」或「replace 形状的 `surfaceOp`
+解析不到位置」这两种形状，为 0 则升级后投影不会出问题。
 
 ---
 
